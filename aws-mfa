@@ -1,0 +1,66 @@
+#!/bin/bash
+#
+# With long-term access keys and MFA we can get temporary token
+# (key, secret key and session token) valid for 12 hours.
+# Then we can protect aws-cli api calls with MFA enabled (normally it is not protected with MFA)
+# If we add conditions to IAM policies like this:
+#     "Condition": {"Bool": {"aws:MultiFactorAuthPresent": "true"}}
+#      or aws:MultiFactorAuthAge
+# we can secure aws cli api calls.
+#
+# Author Predrag Vlajkovic (predrag.vlajkovic@gmail.com) 2021
+
+# set variables
+AWS_USERNAME=`whoami`
+ARN_OF_MFA=arn:aws:iam::016682580984:mfa/${AWS_USERNAME}
+LT_PROFILE="long-term"
+TOKEN_FILE=~/.aws/.token_file
+CREDENTIALS_FILE=~/.aws/credentials
+
+# check if aws cli is installed
+AWS_CLI=`which aws`
+if [ $? -ne 0 ]; then
+  echo "AWS CLI is not installed; exiting"
+  exit 1
+fi
+
+# check if previous token is still valid
+VALID=$(grep 'aws_token_expiration' ${TOKEN_FILE} | cut -f 2 -d' ' -d'='| sed 's/"//g')
+PIT=$(date +"%Y-%m-%dT%H-%M-%S")
+if [[ "${PIT}" < "${VALID}" ]]; then
+  echo "Current token is valid until ${VALID}, no need to get now one."
+  exit 1
+fi
+
+# user have to enter mfa code
+echo -n "Please enter your AWS MFA code: "
+read MFA_TOKEN_CODE
+
+touch ${TOKEN_FILE}
+
+# get new session parameters; token, key id, secret access key and expiration time
+aws --profile ${LT_PROFILE} \
+  sts get-session-token \
+  --serial-number ${ARN_OF_MFA} \
+  --token-code ${MFA_TOKEN_CODE} \
+  --output text \
+  | awk '{printf("export aws_access_key_id=\"%s\"\nexport aws_token_expiration=\"%s\"\nexport aws_secret_access_key=\"%s\"\nexport aws_session_token=\"%s\"\n ",$2,$3,$4,$5)}' > ${TOKEN_FILE}
+
+if [ "$?" -ne 0 ]; then
+    echo "Failed do get new session token"
+    exit 1
+fi
+
+# unset old environment variables and set new
+unset aws_access_key_id
+unset aws_secret_access_key
+unset aws_session_token
+unset aws_token_expiration
+source ${TOKEN_FILE}
+
+# Define credentials in [default] named profile
+aws configure --profile default set aws_access_key_id ${aws_access_key_id}
+aws configure --profile default set aws_secret_access_key ${aws_secret_access_key}
+aws configure --profile default set aws_session_token ${aws_session_token}
+
+echo "New session started, session is valid for next 12 hours."
